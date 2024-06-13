@@ -35,7 +35,7 @@ export class ARC59 extends Contract {
    * Deploy ARC59 contract
    *
    */
-  createApplication(): void {}
+  createApplication(): void { }
 
   /**
    * Opt the ARC59 router into the ASA. This is required before this app can be used to send the ASA to anyone.
@@ -183,6 +183,39 @@ export class ARC59 extends Contract {
 
     return inbox;
   }
+
+  /**
+   * Fund an account before claiming
+   */
+  arc59_fund(): void {
+    // funding is only possible if the sender has 0-ALGO balance
+    assert(this.txn.sender.balance === 0);
+
+    const inbox = this.inboxes(this.txn.sender).value;
+
+    // make sure arc59_fund is called in conjunction with arc59_claim.
+    // in between arc59_fund and arc59_claim the sender would have to
+    // perform an asset opt-in to actually perform the claim
+    const claimPosition = this.txn.groupIndex + 2;
+    assert(claimPosition < this.txnGroup.length);
+    verifyAppCallTxn(this.txnGroup[claimPosition], {
+      sender: this.txn.sender,
+      applicationID: this.app,
+      numAppArgs: 2,
+    });
+    assert(this.txnGroup[claimPosition].applicationArgs[0] === method('arc59_claim(uint64)void'));
+
+    // send MBR + txn fees to sender:
+    // - 0.1 ALGO for account MBR
+    // - 0.1 ALGO for ASA MBR
+    // - 0.006 ALGO for txn fees (fund, opt-in, claim)
+    sendPayment({
+      sender: inbox,
+      receiver: this.txn.sender,
+      amount: 206000,
+    });
+  }
+
 
   /**
    * Claim an ASA from the inbox

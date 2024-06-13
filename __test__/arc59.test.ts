@@ -1,8 +1,9 @@
 import { describe, test, expect, beforeAll, beforeEach } from '@jest/globals';
 import { algorandFixture } from '@algorandfoundation/algokit-utils/testing';
 import * as algokit from '@algorandfoundation/algokit-utils';
-import algosdk from 'algosdk';
+import algosdk, { Address } from 'algosdk';
 import { Arc59Client } from '../contracts/clients/Arc59Client';
+import { AlgoAmount } from '@algorandfoundation/algokit-utils/types/amount';
 
 const fixture = algorandFixture();
 algokit.Config.configure({ populateAppCallResources: true });
@@ -14,7 +15,7 @@ async function sendAsset(
   signer: algosdk.Account,
   receiver: string,
   algorand: algokit.AlgorandClient
-) {
+): Promise<string | null> {
   const arc59RouterAddress = (await appClient.appClient.getAppReference()).appAddress;
 
   const [itxns, mbr, routerOptedIn, receiverOptedIn] = (
@@ -29,7 +30,7 @@ async function sendAsset(
       amount: 1n,
     });
 
-    return;
+    return null;
   }
 
   const composer = appClient.compose();
@@ -62,7 +63,7 @@ async function sendAsset(
 
   /** The address of the receiver's inbox */
   const inboxAddress = (await appClient.compose().arc59GetInbox({ receiver }, { boxes }).simulate()).returns[0];
-  await composer
+  const sendResult = await composer
     .arc59SendAsset(
       { axfer, receiver },
       {
@@ -77,6 +78,8 @@ async function sendAsset(
     .execute();
 
   algokit.Config.configure({ populateAppCallResources: true });
+
+  return sendResult.returns[sendResult.returns.length - 1];
 }
 
 describe('Arc59', () => {
@@ -177,5 +180,69 @@ describe('Arc59', () => {
     await sendAsset(appClient, newAsset, alice.addr, alice, bob.addr, algorand);
 
     await appClient.arc59Reject({ asa: newAsset }, { sender: bob, sendParams: { fee: algokit.algos(0.003) } });
+  });
+
+  test('0-ALGO claiming', async () => {
+    const { algorand } = fixture;
+    const algod = algorand.client.algod;
+
+    // this is a 0-ALGO account that will claim the asset
+    const eve = await fixture.context.generateAccount({
+      initialFunds: AlgoAmount.MicroAlgos(0),
+    });
+
+    // send asset to Eve plus some extra ALGO to claim
+    const inboxAddress = await sendAsset(appClient, assetOne, alice.addr, alice, eve.addr, algorand);
+    const suggestedParams = await algod.getTransactionParams().do();
+    await algod.sendRawTransaction(algosdk.makePaymentTxnWithSuggestedParamsFromObject({
+      from: alice.addr,
+      to: inboxAddress!,
+      amount: 206_000,
+      suggestedParams: { ...suggestedParams, fee: 1000, flatFee: true },
+    }).signTxn(alice.sk)).do();
+    console.log("Eve's inbox: " + inboxAddress);
+
+    // make sure that Eve doesn't have ALGO and any ASA in her account
+    let eveAccountInfo = await algorand.account.getInformation(eve.addr);
+    expect(eveAccountInfo.amount).toBe(0);
+
+    // claiming
+    const composer = appClient.compose();
+    composer.arc59Fund({}, {
+      sender: eve,
+      sendParams: { fee: algokit.microAlgos(0) },
+      boxes: [algosdk.decodeAddress(eve.addr).publicKey],
+      accounts: [eve.addr, inboxAddress!],
+      assets: [Number(assetOne)],
+    });
+
+    const optInTxn = await algorand.transactions.assetTransfer({
+      sender: eve.addr,
+      receiver: eve.addr,
+      assetId: assetOne,
+      amount: 0n,
+    });
+    composer.addTransaction({
+      transaction: optInTxn,
+      signer: eve,
+    });
+
+    composer.arc59Claim({
+      asa: Number(assetOne)
+    }, {
+      sender: eve,
+      sendParams: { fee: algokit.microAlgos(6000) },
+      boxes: [algosdk.decodeAddress(eve.addr).publicKey],
+      accounts: [eve.addr, inboxAddress!],
+      assets: [Number(assetOne)],
+    });
+
+    await composer.execute();
+
+    // now Eve should have ALGO and an ASA
+    // eveAccountInfo = await algorand.account.getInformation(eve.addr);
+    // expect(eveAccountInfo.amount).toBe(200_000);
+    let eveAssetInfo = await algorand.account.getAssetInformation(eve.addr, assetOne);
+    expect(eveAssetInfo.balance).toBe(1n);
   });
 });
